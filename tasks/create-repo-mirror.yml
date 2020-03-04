@@ -1,18 +1,36 @@
 ---
 
-- name: "Sync images from {{images}}"
-  hosts: quay
+- name: "Sync images"
+  hosts: localhost
   gather_facts: yes
   vars:
-    QUAY_AUTH_TOKEN: "{{ QUAY_AUTH_TOKEN }}"
-    USERNAME: "{{ UPSTREAM_REGISTRY_USERNAME }}"
-    PASSWORD: "{{ UPSTREAM_REGISTRY_PASSWORD }}"
-  vars_files:
-     - "{{ images }}"
+    QUAY_AUTH_TOKEN: ""
+    QUAY_ENDPOINT: ""
+    NAMESPACE: ""
+    IMAGE: ""
+    IMAGE_NAME: ""
+    EXTERNAL_REGISTRY: "registry.redhat.io"
+    ROBOT_ACCOUNT: ""
+    TAGS: ""
+    USERNAME: ""
+    PASSWORD: ""
   tasks:
-    - name: Create repo
+    - name: Check repository status
       uri:
-        url: "http://{{ QUAY_ENDPOINT }}/api/v1/repository"
+        url: "https://{{ QUAY_ENDPOINT }}/api/v1/repository/{{ NAMESPACE }}/{{ IMAGE_NAME }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ QUAY_AUTH_TOKEN }}"
+        validate_certs: no
+        body_format: json
+        status_code:
+          - 200
+          - 404
+      register: result_repo
+
+    - name: Create repository
+      uri:
+        url: "https://{{ QUAY_ENDPOINT }}/api/v1/repository"
         method: POST
         headers:
           Authorization: "Bearer {{ QUAY_AUTH_TOKEN }}"
@@ -21,17 +39,28 @@
         status_code: 201
         body:
           repo_kind: 'image'
-          namespace: "{{ item.image.split('/')[0] }}"
+          namespace: "{{ NAMESPACE }}"
           visibility: 'public'
-          repository: "{{ item.image.split('/')[1] }}"
+          repository: "{{ IMAGE_NAME }}"
           description: ''
-      with_items: "{{ docker_images }}"
-      register: result
-      ignore_errors: true
+      when: result_repo.status == 404
 
-    - name: Create mirrors
+    - name: Check mirror status
       uri:
-        url: "http://{{ QUAY_ENDPOINT }}/api/v1/repository/{{item.image}}/mirror"
+        url: "https://{{ QUAY_ENDPOINT }}/api/v1/repository/{{ NAMESPACE }}/{{ IMAGE_NAME }}/mirror"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ QUAY_AUTH_TOKEN }}"
+        validate_certs: no
+        body_format: json
+        status_code:
+          - 200
+          - 404
+      register: result_mirror
+
+    - name: Create mirror
+      uri:
+        url: "https://{{ QUAY_ENDPOINT }}/api/v1/repository/{{ NAMESPACE}}/{{ IMAGE_NAME }}/mirror"
         method: POST
         headers:
           Authorization: "Bearer {{ QUAY_AUTH_TOKEN }}"
@@ -45,14 +74,33 @@
               https_proxy: ""
               http_proxy: ""
               no_proxy: ""
-          external_registry_username: "{{ USERNAME }}"
-          location: "{{item.src_registry}}/{{item.image}}"
+            verify_tls: false
+          external_reference: "{{ EXTERNAL_REGISTRY }}/{{ IMAGE }}"
           sync_start_date: "{{ ansible_date_time['iso8601'] }}"
           root_rule:
-            rule_type: "TAG_GLOB_CSV"
+            rule_kind: "tag_glob_csv"
             rule_value:
-              "{{ item.tags }}"
-          external_registry_password: "{{PASSWORD}}"
+              "{{ TAGS }}"
+          external_registry_username: "{{ USERNAME }}"
+          external_registry_password: "{{ PASSWORD }}"
           sync_interval: 86400
-          robot_username: "{{ item.image.split('/')[0] }}+mirror"
-      with_items: "{{ docker_images }}"
+          robot_username: "{{ ROBOT_ACCOUNT }}"
+      when: result_mirror.status == 404
+
+    - name: Modify mirror
+      uri:
+        url: "https://{{ QUAY_ENDPOINT }}/api/v1/repository/{{ NAMESPACE}}/{{ IMAGE_NAME }}/mirror"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ QUAY_AUTH_TOKEN }}"
+        validate_certs: no
+        body_format: json
+        status_code: 201
+        body:
+          root_rule:
+            rule_kind: "tag_glob_csv"
+            rule_value:
+              "{{ TAGS }}"
+      when: 
+        - result_mirror.status == 200
+        - result_mirror.json.root_rule.rule_value != TAGS
